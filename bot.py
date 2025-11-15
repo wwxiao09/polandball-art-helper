@@ -144,13 +144,6 @@ class SheetClient:
         records: List[CountryRecord] = []
 
         for row in values[1:]:
-            in_game = (
-                row[in_game_i].strip().lower()
-                if in_game_i is not None and in_game_i < len(row)
-                else ""
-            )
-            if in_game in UNAVAILABLE_VALUES:
-                continue
 
             country = (
                 row[character_i].strip()
