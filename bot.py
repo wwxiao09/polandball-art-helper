@@ -417,7 +417,7 @@ async def available(ctx: commands.Context, *args: str):
             title=rec.country,
             description=ig_text,
             url=GOOGLE_SHEET_URL,
-            color=discord.Color.green() if ig is True else discord.Color.orange(),
+            color=discord.Color.light_grey() if ig is True else discord.Color.green(),
         )
         embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
 
