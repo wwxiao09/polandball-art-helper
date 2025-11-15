@@ -15,8 +15,8 @@ Quick Start
 1) Python 3.10+
 2) pip install -r requirements.txt
 3) Put your Discord bot token in the DISCORD_TOKEN env var.
-4) Create a Google Cloud service account with Google Sheets API enabled.
-5) Download the JSON key as service_account.json (same folder) and share your Google Sheet with the service account email.
+4) On Cloud Run, attach a service account with Sheets+Drive read access.
+5) Share your Google Sheet with that service account email.
 6) Set these env vars:
    - GOOGLE_SHEET_ID = the Sheet ID from its URL
    - SHEET_NAME = the tab name (default: "Availability")
@@ -33,10 +33,6 @@ E: Sprite Art Artist (Primary)
 F: Rdy (for Sprite)                 (Y/N or empty)
 G: Splash Art Artist (Alternate)
 H: Sprite Art Artist (Alternate)
-
-Run
----
-$ python bot.py
 """
 
 from __future__ import annotations
@@ -55,6 +51,7 @@ from discord.ext import commands
 
 import gspread
 from google.oauth2.service_account import Credentials
+from google.auth import default as google_auth_default
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
@@ -108,16 +105,14 @@ class SheetClient:
             "https://www.googleapis.com/auth/spreadsheets.readonly",
             "https://www.googleapis.com/auth/drive.readonly",
         ]
+
         if SERVICE_ACCOUNT_JSON:
             info = json.loads(SERVICE_ACCOUNT_JSON)
             creds = Credentials.from_service_account_info(info, scopes=scopes)
-        else:
-            if not os.path.exists(SERVICE_ACCOUNT_FILE):
-                raise FileNotFoundError(
-                    f"Service account file not found at {SERVICE_ACCOUNT_FILE}. "
-                    "Place your key there or set SERVICE_ACCOUNT_JSON env var."
-                )
+        elif SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
             creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+        else:
+            creds, _ = google_auth_default(scopes=scopes)
 
         self.gc = gspread.authorize(creds)
         if not GOOGLE_SHEET_ID:
@@ -325,7 +320,28 @@ async def ping(ctx: commands.Context):
     await ctx.reply("pong")
 
 
-if __name__ == "__main__":
+async def handle_client(reader, writer):
+    try:
+        await reader.read(1024)
+        response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+        writer.write(response)
+        await writer.drain()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def main():
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN env var is required.")
-    bot.run(DISCORD_TOKEN)
+    port = int(os.getenv("PORT", "8080"))
+    server = await asyncio.start_server(handle_client, host="0.0.0.0", port=port)
+    async with server:
+        await asyncio.gather(
+            bot.start(DISCORD_TOKEN),
+            server.serve_forever(),
+        )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
