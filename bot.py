@@ -317,7 +317,26 @@ async def available(ctx: commands.Context, *args: str):
 async def ping(ctx: commands.Context):
     await ctx.reply("pong")
 
-if __name__ == "__main__":
+async def handle_client(reader, writer):
+    try:
+        await reader.read(1024)
+        response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+        writer.write(response)
+        await writer.drain()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+async def main():
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN env var is required.")
-    bot.run(DISCORD_TOKEN)
+    port = int(os.getenv("PORT", "8080"))
+    server = await asyncio.start_server(handle_client, host="0.0.0.0", port=port)
+    async with server:
+        await asyncio.gather(
+            bot.start(DISCORD_TOKEN),
+            server.serve_forever(),
+        )
+
+if __name__ == "__main__":
+    asyncio.run(main())
