@@ -382,10 +382,11 @@ async def available(ctx: commands.Context, *args: str):
         s_sprite = rec.is_available("sprite")
         s_splash = rec.is_available("splash")
 
-        # Make the character name more prominent: uppercase title and bold+underlined
-        # name in the description (embed titles are visually larger; description
-        # supports markdown so we emphasize the name there as well).
-        embed = discord.Embed(title=rec.country.upper(), color=discord.Color.green())
+        # Make the character name more prominent: uppercase title. Set the embed
+        # URL so the title becomes clickable. Note: Discord footers do not support
+        # clickable links, so we place a small non-clickable footer and make the
+        # embed title itself open the sheet.
+        embed = discord.Embed(title=rec.country.upper(), color=discord.Color.green(), url=GOOGLE_SHEET_URL)
         sprite_label, sprite_sub = label(s_sprite, rec.sprite_artist, rec.sprite_rdy)
         splash_label, splash_sub = label(s_splash, rec.splash_artist, rec.splash_rdy)
 
@@ -405,12 +406,15 @@ async def available(ctx: commands.Context, *args: str):
         if splash_sub:
             splash_value += f" — {splash_sub}"
 
-        embed.add_field(name="In Game", value=ig_text, inline=False)
+        # Use a zero-width space as the field name so no title is visible
+        embed.add_field(name="\u200b", value=ig_text, inline=False)
         embed.add_field(name="Sprite", value=sprite_value, inline=False)
         embed.add_field(name="Splash", value=splash_value, inline=False)
 
-        # Prominent name + clickable source link in the description
-        embed.description = f"**__{rec.country}__**\n\n[Sourced from Characters]({GOOGLE_SHEET_URL})"
+        # Remove duplicate name; put a small footer (non-clickable) and make the
+        # title clickable via `embed.url` above.
+        embed.description = None
+        embed.set_footer(text="Sourced from Characters")
         await ctx.reply(embed=embed)
         return
 
