@@ -2,13 +2,16 @@
 Discord Bot for Polandball Availability
 ======================================
 
-Commands (prefix: !)
----------------------
-1) !available ball
+Commands (slash commands: /)
+----------------------------
+1) /available ball
    → Replies with a comma-separated list of all available balls from your Google Sheet.
 
-2) !available "Country X"
+2) /available character: "Country X"
    → Replies with sprite/splash availability for that character.
+
+3) /ping
+   → Replies with pong.
 
 Quick Start
 -----------
@@ -19,7 +22,7 @@ Quick Start
 5) Share your Google Sheet with that service account email.
 6) Set these env vars:
    - GOOGLE_SHEET_ID = the Sheet ID from its URL
-   - SHEET_NAME = the tab name (default: "Availability")
+   - SHEET_NAME = the tab name (default: "Characters")
    - AVAILABLE_VALUES = comma-separated values considered available (default: "y")
    - UNAVAILABLE_VALUES = comma-separated values considered unavailable (default: "n")
 
@@ -48,6 +51,7 @@ from typing import Dict, List, Optional, Tuple
 
 import discord
 from discord.ext import commands
+from discord import app_commands
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -293,13 +297,18 @@ class PolandballBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(command_prefix="!", intents=intents, help_command=None)
+        super().__init__(command_prefix="/", intents=intents, help_command=None)
         self.sheet_client: Optional[SheetClient] = None
         self.cache = Cache(ttl=CACHE_TTL_SECS)
         self._command_lock = False
 
     async def on_ready(self):
         logger.info("Logged in as %s (id=%s)", self.user, self.user.id)
+        try:
+            synced = await self.tree.sync()
+            logger.info("Synced %d command(s)", len(synced))
+        except Exception as e:
+            logger.exception("Failed to sync commands: %s", e)
 
     def _load_index(self) -> AvailabilityIndex:
         cached = self.cache.get()
@@ -316,18 +325,20 @@ class PolandballBot(commands.Bot):
 bot = PolandballBot()
 
 
-@bot.command(name="available")
-async def available(ctx: commands.Context, *args: str):
+@bot.tree.command(name="available", description="Check availability of characters or view all available characters")
+@app_commands.describe(character="Character name (leave blank to see all available)")
+async def available(interaction: discord.Interaction, character: Optional[str] = None):
+    await interaction.response.defer()
     try:
         idx = bot._load_index()
     except Exception as e:
         logger.exception("Sheet load failed")
-        await ctx.reply(f"Sorry, I couldn't load the availability sheet: {e}")
+        await interaction.followup.send(f"Sorry, I couldn't load the availability sheet: {e}")
         return
 
-    arg_str = " ".join(args).strip()
+    arg_str = (character or "").strip()
 
-    if arg_str.strip().lower() in {"ball", "balls"}:
+    if arg_str.lower() in {"ball", "balls", ""}:
         sprite_list = sorted(
             {r.country for r in idx.by_norm.values() if r.is_available("sprite") is True},
             key=str.lower,
@@ -371,7 +382,7 @@ async def available(ctx: commands.Context, *args: str):
         for title, content, inline in fields_from_list("Splashes", splash_list):
             embed.add_field(name=title, value=content, inline=False)
 
-        await ctx.reply(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
     rec, suggestion = idx.find(arg_str)
@@ -425,14 +436,14 @@ async def available(ctx: commands.Context, *args: str):
         embed.add_field(name="Splash", value="\n".join(splash_lines), inline=True)
 
         embed.set_footer(text=f"Sourced from {SHEET_NAME}")
-        await ctx.reply(embed=embed)
+        await interaction.followup.send(embed=embed)
         return
 
 
     if suggestion:
-        await ctx.reply(f"I couldn't find that exactly.\nDid you mean **{suggestion}**?")
+        await interaction.followup.send(f"I couldn't find that exactly.\nDid you mean **{suggestion}**?")
     else:
-        await ctx.reply("I couldn't find that country in the sheet.")
+        await interaction.followup.send("I couldn't find that country in the sheet.")
 
 
 def format_ready_flag(raw: str) -> str:
@@ -446,9 +457,9 @@ def format_ready_flag(raw: str) -> str:
     return raw
 
 
-@bot.command(name="ping")
-async def ping(ctx: commands.Context):
-    await ctx.reply("pong")
+@bot.tree.command(name="ping", description="Ping the bot")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message("pong")
 
 
 async def start_health_check_server():
