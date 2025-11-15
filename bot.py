@@ -78,8 +78,10 @@ logger = logging.getLogger("polandball-bot")
 @dataclass
 class CountryRecord:
     country: str
-    splash_raw: str
-    sprite_raw: str
+    splash_artist: str
+    splash_rdy: str
+    sprite_artist: str
+    sprite_rdy: str
 
     def _parse(self, raw: str) -> Optional[bool]:
         if not raw:
@@ -93,9 +95,9 @@ class CountryRecord:
 
     def is_available(self, kind: str) -> Optional[bool]:
         if kind == "splash":
-            return self._parse(self.splash_raw)
+            return self._parse(self.splash_artist)
         if kind == "sprite":
-            return self._parse(self.sprite_raw)
+            return self._parse(self.sprite_artist)
         return None
 
 
@@ -134,8 +136,10 @@ class SheetClient:
 
         in_game_i = col_letter_to_index("A")
         character_i = col_letter_to_index("B")
-        splash_rdy_i = col_letter_to_index("C")
-        sprite_rdy_i = col_letter_to_index("E")
+        splash_artist_i = col_letter_to_index("C")
+        splash_rdy_i = col_letter_to_index("D")
+        sprite_artist_i = col_letter_to_index("E")
+        sprite_rdy_i = col_letter_to_index("F")
 
         records: List[CountryRecord] = []
 
@@ -153,12 +157,22 @@ class SheetClient:
                 if character_i is not None and character_i < len(row)
                 else ""
             )
-            splash = (
+            splash_artist = (
+                row[splash_artist_i].strip()
+                if splash_artist_i is not None and splash_artist_i < len(row)
+                else ""
+            )
+            splash_rdy = (
                 row[splash_rdy_i].strip()
                 if splash_rdy_i is not None and splash_rdy_i < len(row)
                 else ""
             )
-            sprite = (
+            sprite_artist = (
+                row[sprite_artist_i].strip()
+                if sprite_artist_i is not None and sprite_artist_i < len(row)
+                else ""
+            )
+            sprite_rdy = (
                 row[sprite_rdy_i].strip()
                 if sprite_rdy_i is not None and sprite_rdy_i < len(row)
                 else ""
@@ -168,8 +182,10 @@ class SheetClient:
                 records.append(
                     CountryRecord(
                         country=country,
-                        splash_raw=splash,
-                        sprite_raw=sprite,
+                        splash_artist=splash_artist,
+                        splash_rdy=splash_rdy,
+                        sprite_artist=sprite_artist,
+                        sprite_rdy=sprite_rdy,
                     )
                 )
         return records
@@ -292,20 +308,21 @@ async def available(ctx: commands.Context, *args: str):
 
     rec, suggestion = idx.find(arg_str)
     if rec:
-        def label(v, raw):
-            if v is True:
+        def label(available, artist, rdy):
+            if available is True:
                 return "✅ AVAILABLE"
-            if v is False:
-                return "❌ NOT available"
-            return f"⚠️ Unknown (`{raw}`)"
+            if available is False:
+                rdy_status = "✅ Rdy" if rdy.lower() == "y" else "⏳ Not Rdy" if rdy else "❓ No status"
+                return f"🎨 {artist} ({rdy_status})"
+            return "⚠️ Unknown"
 
         s_sprite = rec.is_available("sprite")
         s_splash = rec.is_available("splash")
 
         await ctx.reply(
             f"**{rec.country}**\n"
-            f"• Sprite: {label(s_sprite, rec.sprite_raw)}\n"
-            f"• Splash: {label(s_splash, rec.splash_raw)}"
+            f"• Sprite: {label(s_sprite, rec.sprite_artist, rec.sprite_rdy)}\n"
+            f"• Splash: {label(s_splash, rec.splash_artist, rec.splash_rdy)}"
         )
         return
 
