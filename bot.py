@@ -974,7 +974,10 @@ class TOSModal(discord.ui.Modal):
                 value="☑️ I agree to the Terms and grant the Polandball Go team a license to use my art under these terms.\n☑️ I confirm this is 100% my original work.",
                 inline=False
             )
-            welcome_embed.set_footer(text="Polandball Go | Zone Gaming")
+            welcome_embed.set_footer(
+                text="Polandball Go | Zone Gaming",
+                icon_url=interaction.client.user.display_avatar.url
+            )
 
             # Send ping and welcome embed
             welcome_msg = await thread.send(content=ping_content, embed=welcome_embed)
@@ -2509,6 +2512,10 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
                 timestamp=datetime.now(timezone.utc)
             )
             staff_msg_embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+            staff_msg_embed.set_footer(
+                text="Polandball Go | Zone Gaming",
+                icon_url=interaction.client.user.display_avatar.url
+            )
             await thread.send(embed=staff_msg_embed)
 
         # DM the ticket creator if a message is specified
@@ -2516,14 +2523,42 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
         if message:
             if creator:
                 try:
+                    open_timestamp = int(thread.created_at.timestamp())
+                    close_timestamp = int(datetime.now(timezone.utc).timestamp())
+                    panel_name = thread.parent.name if thread.parent else "Unknown"
+                    
                     dm_embed = discord.Embed(
-                        title=f"Ticket Closed: {thread.name}",
-                        description=f"Your ticket in **{interaction.guild.name}** has been closed.",
+                        title="Submission Closed",
+                        description=(
+                            "Thank you so much for submitting art to Polandball Go! We really appreciate your art.\n\n"
+                            "Your art has been reviewed by our team, here is the result:\n\n"
+                            f"> {message}\n\n"
+                            "If you are confused about anything or if there is something you want to go back and see within the thread, press the \"🔗 View Thread\" button below. 👇\n\n"
+                            "### Submission Information\n"
+                            f"• **Open Date:** <t:{open_timestamp}:F>\n"
+                            f"• **Panel Name:** #{panel_name}\n"
+                            f"• **Ticket Name:** {thread.name}\n"
+                            f"• **Close Date:** <t:{close_timestamp}:F>\n\n"
+                            "*If you have any further questions or concerns, feel free to ask us.*"
+                        ),
                         color=discord.Color.red(),
                         timestamp=datetime.now(timezone.utc)
                     )
-                    dm_embed.add_field(name="Closing Message from Staff", value=message, inline=False)
-                    await creator.send(embed=dm_embed)
+                    dm_embed.set_footer(
+                        text="Polandball Go | Zone Gaming",
+                        icon_url=interaction.client.user.display_avatar.url
+                    )
+                    
+                    # Create link button to jump back to the thread
+                    dm_view = discord.ui.View()
+                    dm_view.add_item(discord.ui.Button(
+                        label="View Thread",
+                        style=discord.ButtonStyle.link,
+                        url=thread.jump_url,
+                        emoji="🔗"
+                    ))
+                    
+                    await creator.send(embed=dm_embed, view=dm_view)
                     dm_status = f"✅ Sent closing message to {creator.mention}'s DM inbox."
                 except discord.Forbidden:
                     dm_status = f"❌ Failed to send DM to {creator.mention} (user has DMs disabled or blocked)."
@@ -2574,6 +2609,10 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
                 log_embed.add_field(name="Closing Message", value=message, inline=False)
             if dm_status:
                 log_embed.add_field(name="User DM Status", value=dm_status, inline=False)
+            log_embed.set_footer(
+                text="Polandball Go | Zone Gaming",
+                icon_url=interaction.client.user.display_avatar.url
+            )
 
             file_to_send = discord.File(temp_path, filename=f"transcript-{thread.name}-{thread.id}.html")
             await target_channel.send(
@@ -2595,6 +2634,10 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
                         log_embed.add_field(name="Closing Message", value=message, inline=False)
                     if dm_status:
                         log_embed.add_field(name="User DM Status", value=dm_status, inline=False)
+                    log_embed.set_footer(
+                        text="Polandball Go | Zone Gaming",
+                        icon_url=interaction.client.user.display_avatar.url
+                    )
 
                     file_to_send = discord.File(temp_path, filename=f"transcript-{thread.name}-{thread.id}.html")
                     await thread.parent.send(
@@ -2633,6 +2676,10 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
                 value=dm_status,
                 inline=False
             )
+        close_embed.set_footer(
+            text="Polandball Go | Zone Gaming",
+            icon_url=interaction.client.user.display_avatar.url
+        )
             
         await interaction.followup.send(embed=close_embed)
         
@@ -2642,6 +2689,56 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
     except Exception as e:
         logger.exception("Failed to close ticket: %s", e)
         await interaction.followup.send(f"❌ An error occurred while closing the ticket: {e}", ephemeral=True)
+
+
+@close_ticket.autocomplete('message')
+async def close_ticket_message_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    # Resolve the transcript log channel
+    target_channel = None
+    if TICKET_TRANSCRIPT_CHANNEL_ID:
+        try:
+            channel_id = int(TICKET_TRANSCRIPT_CHANNEL_ID)
+            target_channel = interaction.client.get_channel(channel_id)
+            if not target_channel:
+                target_channel = await interaction.client.fetch_channel(channel_id)
+        except Exception:
+            pass
+
+    # Fallback to parent channel if not configured or not found
+    if not target_channel:
+        target_channel = interaction.channel.parent if isinstance(interaction.channel, discord.Thread) else None
+
+    if not target_channel:
+        return []
+
+    suggestions = []
+    try:
+        # Fetch the last 100 messages in the logging channel
+        async for msg in target_channel.history(limit=100):
+            if msg.author.id == interaction.client.user.id and msg.embeds:
+                for embed in msg.embeds:
+                    if embed.title == "Ticket Transcript Log":
+                        # Scan fields for "Closing Message"
+                        for field in embed.fields:
+                            if field.name == "Closing Message" and field.value:
+                                val = field.value.strip()
+                                # Clean up leading blockquote characters if present in raw form
+                                if val and val not in suggestions:
+                                    suggestions.append(val)
+    except Exception as e:
+        logger.warning("Failed to fetch autocomplete suggestions: %s", e)
+
+    # Filter based on current user input (case-insensitive)
+    filtered = [
+        s for s in suggestions
+        if current.lower() in s.lower()
+    ]
+
+    # Discord choice limits: name and value must be <= 100 characters
+    return [
+        app_commands.Choice(name=s[:100], value=s[:100])
+        for s in filtered
+    ][:25]
 
 
 @ticket_group.command(name="reopen", description="Unarchive and unlock a ticket thread")
@@ -2675,6 +2772,10 @@ async def reopen_ticket(interaction: discord.Interaction, thread: Optional[disco
             title="Ticket Reopened",
             description=f"This ticket has been reopened by {interaction.user.mention}.",
             color=discord.Color.green()
+        )
+        reopen_embed.set_footer(
+            text="Polandball Go | Zone Gaming",
+            icon_url=interaction.client.user.display_avatar.url
         )
         await target_thread.send(embed=reopen_embed)
         await interaction.followup.send(f"✅ Reopened ticket thread {target_thread.mention}.", ephemeral=True)
@@ -2733,6 +2834,10 @@ async def list_tickets(interaction: discord.Interaction):
             thread_list.append(f"• {thread.mention} - Archived <t:{timestamp}:R>")
             
         embed.description = "\n".join(thread_list)
+        embed.set_footer(
+            text="Polandball Go | Zone Gaming",
+            icon_url=interaction.client.user.display_avatar.url
+        )
         await interaction.followup.send(embed=embed, ephemeral=True)
         
     except Exception as e:
