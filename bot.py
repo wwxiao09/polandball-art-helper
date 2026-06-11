@@ -867,16 +867,37 @@ class TOSModal(discord.ui.Modal):
             await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
             return
 
-        channel = interaction.channel
-        if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
-            await interaction.followup.send("Tickets can only be created under a text channel.", ephemeral=True)
-            return
-
         user = interaction.user
         category_label = self.category
         thread_name = f"Submit Your Art - {category_label} - {user.name}"
 
-        # Register the licensing agreement signature in the backend database
+        # Map category to target channel ID
+        category_channels = {
+            "General": 1513715448980574268,
+            "Upcoming Banner": 1513715657848520865,
+            "Asset": 1513715769072947301,
+            "Mymic": 1513715531134402671
+        }
+        
+        target_channel_id = category_channels.get(category_label)
+        target_channel = None
+        if target_channel_id:
+            target_channel = guild.get_channel(target_channel_id)
+            if not target_channel:
+                try:
+                    target_channel = await guild.fetch_channel(target_channel_id)
+                except Exception as fetch_err:
+                    logger.warning("Failed to fetch target channel %s: %s", target_channel_id, fetch_err)
+
+        # Fallback to interaction.channel
+        if not target_channel or not isinstance(target_channel, (discord.TextChannel, discord.ForumChannel)):
+            target_channel = interaction.channel
+
+        if not isinstance(target_channel, (discord.TextChannel, discord.ForumChannel)):
+            await interaction.followup.send("Tickets can only be created under a text or forum channel.", ephemeral=True)
+            return
+
+        # Register the licensing agreement signature in the database
         await submit_licensing_agreement(
             user_id=user.id,
             username=user.name,
@@ -888,7 +909,7 @@ class TOSModal(discord.ui.Modal):
 
         # Resolve roles to ping
         config = load_ticket_config()
-        channel_id_str = str(channel.id)
+        channel_id_str = str(target_channel.id)
         role_ids = config.get(channel_id_str, {}).get("ping_role_ids", [])
         
         roles_to_ping = []
@@ -911,7 +932,7 @@ class TOSModal(discord.ui.Modal):
         try:
             # Create a private thread if possible, fallback to public thread
             try:
-                thread = await channel.create_thread(
+                thread = await target_channel.create_thread(
                     name=thread_name,
                     type=discord.ChannelType.private_thread,
                     invitable=False,
@@ -919,7 +940,7 @@ class TOSModal(discord.ui.Modal):
                 )
             except discord.HTTPException as e:
                 logger.warning("Failed to create private thread, falling back to public thread: %s", e)
-                thread = await channel.create_thread(
+                thread = await target_channel.create_thread(
                     name=thread_name,
                     type=discord.ChannelType.public_thread,
                     reason=f"Art Submission Ticket for {user.name}"
@@ -930,11 +951,19 @@ class TOSModal(discord.ui.Modal):
             except Exception:
                 pass
 
+            category_desc = {
+                "General": "creating art",
+                "Upcoming Banner": "creating art for an upcoming banner",
+                "Asset": "creating game assets",
+                "Mymic": "creating Mymic art"
+            }
+            art_desc = category_desc.get(category_label, "creating art")
+
             # Create welcome embed
             welcome_embed = discord.Embed(
                 title="Ticket Created",
                 description=(
-                    f"Welcome, {user.mention}, and thank you for creating art for an upcoming banner for the Polandball GO game!\n\n"
+                    f"Welcome, {user.mention}, and thank you for {art_desc} for the Polandball GO game!\n\n"
                     f"Please put the image(s) of the splash art and/or sprite art you are submitting for review in this chat, and let us know what countries they are for.\n\n"
                     f"We will respond to you as soon as possible. Please be patient."
                 ),
