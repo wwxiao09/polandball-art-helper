@@ -197,7 +197,23 @@ class SheetClient:
         logger.info("Connected to Google Sheet '%s' tab '%s'", GOOGLE_SHEET_ID, SHEET_NAME)
 
     def fetch_records(self) -> List[CountryRecord]:
-        values = self.sheet.get_all_values()
+        try:
+            values = self.sheet.get_all_values()
+        except Exception as e:
+            logger.warning("Google Sheet connection error, attempting reconnect: %s", e)
+            try:
+                # Re-authorize and recreate worksheet instance
+                self.sheet = self.gc.open_by_key(GOOGLE_SHEET_ID).worksheet(SHEET_NAME)
+                values = self.sheet.get_all_values()
+            except Exception as retry_err:
+                logger.warning("Failed to reconnect worksheet, recreating credentials: %s", retry_err)
+                try:
+                    # Refresh the whole SheetClient connection pool and authorization
+                    self.__init__()
+                    values = self.sheet.get_all_values()
+                except Exception as final_err:
+                    logger.error("Fatal error fetching Google Sheet: %s", final_err)
+                    raise final_err
 
         def col_letter_to_index(letter: str):
             letter = (letter or "").strip()
@@ -307,8 +323,9 @@ def normalize_country(text: str) -> str:
 def drive_execute_with_retry(request, *, retries: int = 5, base_delay: float = 0.7):
     """
     Execute a googleapiclient request with exponential backoff retries for transient errors.
-    Retries on 500/503/504 and rate-limit 429.
+    Retries on 500/503/504 and rate-limit 429, as well as SSL and socket transport errors.
     """
+    import urllib3
     for attempt in range(retries):
         try:
             return request.execute()
@@ -321,6 +338,11 @@ def drive_execute_with_retry(request, *, retries: int = 5, base_delay: float = 0
                 time.sleep(min(sleep_s, 8))
                 continue
             raise
+        except (urllib3.exceptions.SSLError, urllib3.exceptions.HTTPError, BrokenPipeError, ConnectionResetError, TimeoutError, OSError) as e:
+            logger.warning("Network/SSL error during Google API request, retrying (attempt %d/%d): %s", attempt + 1, retries, e)
+            sleep_s = base_delay * (2 ** attempt) + random.uniform(0, 0.25)
+            time.sleep(min(sleep_s, 8))
+            continue
 
 def create_drive_service():
     """
@@ -2703,6 +2725,15 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
             
         await interaction.followup.send(embed=close_embed)
         
+        # Add the new message to the autocomplete cache so it's instantly available next time
+        if message:
+            global CLOSED_TICKETS_SUGGESTIONS_CACHE
+            val = message.strip()
+            if val:
+                if val in CLOSED_TICKETS_SUGGESTIONS_CACHE:
+                    CLOSED_TICKETS_SUGGESTIONS_CACHE.remove(val)
+                CLOSED_TICKETS_SUGGESTIONS_CACHE.insert(0, val)
+
         # Archive and lock the thread
         await thread.edit(archived=True, locked=True, reason=f"Closed by {interaction.user.name}")
         
@@ -2711,8 +2742,13 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
         await interaction.followup.send(f"❌ An error occurred while closing the ticket: {e}", ephemeral=True)
 
 
+CLOSED_TICKETS_SUGGESTIONS_CACHE = []
+CLOSED_TICKETS_CACHE_TIME = 0.0
+
 @close_ticket.autocomplete('message')
 async def close_ticket_message_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    global CLOSED_TICKETS_SUGGESTIONS_CACHE, CLOSED_TICKETS_CACHE_TIME
+    
     # Resolve the transcript log channel
     target_channel = None
     if TICKET_TRANSCRIPT_CHANNEL_ID:
@@ -2731,26 +2767,30 @@ async def close_ticket_message_autocomplete(interaction: discord.Interaction, cu
     if not target_channel:
         return []
 
-    suggestions = []
-    try:
-        # Fetch the last 100 messages in the logging channel
-        async for msg in target_channel.history(limit=100):
-            if msg.author.id == interaction.client.user.id and msg.embeds:
-                for embed in msg.embeds:
-                    if embed.title == "Ticket Transcript Log":
-                        # Scan fields for "Closing Message"
-                        for field in embed.fields:
-                            if field.name == "Closing Message" and field.value:
-                                val = field.value.strip()
-                                # Clean up leading blockquote characters if present in raw form
-                                if val and val not in suggestions:
-                                    suggestions.append(val)
-    except Exception as e:
-        logger.warning("Failed to fetch autocomplete suggestions: %s", e)
+    now = time.time()
+    # Refresh cache if older than 5 minutes (300 seconds) or empty
+    if not CLOSED_TICKETS_SUGGESTIONS_CACHE or (now - CLOSED_TICKETS_CACHE_TIME > 300):
+        suggestions = []
+        try:
+            # Fetch a smaller history (limit=50) to keep the refresh call fast
+            async for msg in target_channel.history(limit=50):
+                if msg.author.id == interaction.client.user.id and msg.embeds:
+                    for embed in msg.embeds:
+                        if embed.title == "Ticket Transcript Log":
+                            # Scan fields for "Closing Message"
+                            for field in embed.fields:
+                                if field.name == "Closing Message" and field.value:
+                                    val = field.value.strip()
+                                    if val and val not in suggestions:
+                                        suggestions.append(val)
+            CLOSED_TICKETS_SUGGESTIONS_CACHE = suggestions
+            CLOSED_TICKETS_CACHE_TIME = now
+        except Exception as e:
+            logger.warning("Failed to fetch autocomplete suggestions: %s", e)
 
     # Filter based on current user input (case-insensitive)
     filtered = [
-        s for s in suggestions
+        s for s in CLOSED_TICKETS_SUGGESTIONS_CACHE
         if current.lower() in s.lower()
     ]
 
