@@ -782,7 +782,7 @@ class TicketSystemSelect(discord.ui.Select):
             discord.SelectOption(
                 label="General Submission",
                 value="General",
-                description="Submit any countryball or Mymic.",
+                description="Submit any countryball.",
                 emoji="🎨"
             ),
             discord.SelectOption(
@@ -2468,8 +2468,26 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
         await interaction.response.send_message("❌ This command can only be used inside a ticket thread.", ephemeral=True)
         return
 
-    # Check permission: owner, manage_threads, or role matches config
-    is_owner = thread.owner_id == interaction.user.id
+    await interaction.response.defer(thinking=True)
+
+    # Resolve the actual ticket creator (non-bot user who opened it)
+    creator = None
+    try:
+        async for msg in thread.history(limit=5, oldest_first=True):
+            if msg.author.bot:
+                for mentioned_user in msg.mentions:
+                    if not mentioned_user.bot:
+                        creator = mentioned_user
+                        break
+            else:
+                creator = msg.author
+            if creator:
+                break
+    except Exception as e:
+        logger.warning("Failed to resolve ticket creator: %s", e)
+
+    # Check permission: creator (actual owner), manage_threads, or role matches config
+    is_owner = (creator is not None and creator.id == interaction.user.id) or thread.owner_id == interaction.user.id
     has_permission = interaction.user.guild_permissions.manage_threads
     
     config = load_ticket_config()
@@ -2478,10 +2496,8 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
     has_staff_role = any(role.id in role_ids for role in interaction.user.roles)
     
     if not (is_owner or has_permission or has_staff_role):
-        await interaction.response.send_message("❌ You do not have permission to close this ticket.", ephemeral=True)
+        await interaction.followup.send("❌ You do not have permission to close this ticket.", ephemeral=True)
         return
-
-    await interaction.response.defer(thinking=True)
     
     try:
         # If a closing message is provided, post it to the thread first so it's included in the transcript
@@ -2498,9 +2514,8 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
         # DM the ticket creator if a message is specified
         dm_status = None
         if message:
-            if thread.owner_id:
+            if creator:
                 try:
-                    creator = await interaction.client.fetch_user(thread.owner_id)
                     dm_embed = discord.Embed(
                         title=f"Ticket Closed: {thread.name}",
                         description=f"Your ticket in **{interaction.guild.name}** has been closed.",
@@ -2509,14 +2524,14 @@ async def close_ticket(interaction: discord.Interaction, message: Optional[str] 
                     )
                     dm_embed.add_field(name="Closing Message from Staff", value=message, inline=False)
                     await creator.send(embed=dm_embed)
-                    dm_status = "✅ Sent closing message to the user's DM inbox."
+                    dm_status = f"✅ Sent closing message to {creator.mention}'s DM inbox."
                 except discord.Forbidden:
-                    dm_status = "❌ Failed to send DM (user has DMs disabled or blocked)."
+                    dm_status = f"❌ Failed to send DM to {creator.mention} (user has DMs disabled or blocked)."
                 except Exception as dm_err:
-                    logger.warning("Failed to DM user %s: %s", thread.owner_id, dm_err)
-                    dm_status = f"❌ Failed to send DM: {dm_err}"
+                    logger.warning("Failed to DM user %s: %s", creator.id, dm_err)
+                    dm_status = f"❌ Failed to send DM to {creator.mention}: {dm_err}"
             else:
-                dm_status = "❌ Could not determine thread owner to send DM."
+                dm_status = "❌ Could not determine the ticket creator to send DM."
 
         # Fetch all messages in the thread
         messages = []
