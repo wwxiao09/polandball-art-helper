@@ -50,6 +50,7 @@ H: Sprite Art Artist (Alternate)
 
 from __future__ import annotations
 import asyncio
+import aiohttp
 import difflib
 import json
 import logging
@@ -86,13 +87,16 @@ from googleapiclient.errors import HttpError
 from datetime import datetime, timezone
 
 from PIL import Image
+from pathlib import Path
+from dotenv import load_dotenv
 Image.MAX_IMAGE_PIXELS = 12_000_000  # ~12MP safety cap to prevent memory spikes
 
 # For local test only
 # from dotenv import load_dotenv
 # load_dotenv()
 
-
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Characters")
@@ -100,6 +104,9 @@ GOOGLE_SHEET_URL = os.getenv(
     "GOOGLE_SHEET_URL",
     "https://docs.google.com/spreadsheets/d/1Sud0s7EbgAfBCHR7w21OmnYF-VcG64O8WGM1ixYoRz0/edit?gid=0#gid=0",
 )
+BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8080")
+BACKEND_API_KEY = os.getenv("BACKEND_API_KEY")
+TICKET_TRANSCRIPT_CHANNEL_ID = os.getenv("TICKET_TRANSCRIPT_CHANNEL_ID")
 AVAILABLE_VALUES = set(
     v.strip().lower()
     for v in os.getenv("AVAILABLE_VALUES", "y").split(",")
@@ -502,6 +509,441 @@ class AvailabilityIndex:
         return None, None
 
 
+TICKET_CONFIG_FILE = "ticket_config.json"
+
+def load_ticket_config() -> dict:
+    if os.path.exists(TICKET_CONFIG_FILE):
+        try:
+            with open(TICKET_CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error("Failed to load ticket config: %s", e)
+    return {}
+
+def save_ticket_config(config: dict):
+    try:
+        with open(TICKET_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+    except Exception as e:
+        logger.error("Failed to save ticket config: %s", e)
+
+
+async def submit_licensing_agreement(
+    user_id: int,
+    username: str,
+    guild_id: Optional[int],
+    guild_name: Optional[str],
+    agreement_type: str,
+    agreed_checkboxes: list[str]
+) -> bool:
+    """
+    Submits a licensing/TOS agreement signature to the backend.
+    Returns True on success, False otherwise.
+    """
+    if not BACKEND_API_KEY:
+        logger.warning("BACKEND_API_KEY is not configured. Licensing agreement signature will not be registered in DB.")
+        return False
+
+    url = f"{BACKEND_API_URL.rstrip('/')}/api/v1/licensing-agreements"
+    logger.info("Submitting licensing agreement to URL: %s (Key prefix: %s...)", url, BACKEND_API_KEY[:8] if BACKEND_API_KEY else "None")
+    headers = {
+        "X-API-Key": BACKEND_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "discord_user_id": str(user_id),
+        "discord_username": username,
+        "guild_id": str(guild_id) if guild_id else None,
+        "guild_name": guild_name,
+        "agreement_type": agreement_type,
+        "metadata": {
+            "agreed_checkboxes": agreed_checkboxes,
+            "signed_at_client": datetime.now(timezone.utc).isoformat()
+        }
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # allow_redirects=False prevents aiohttp from following any 302 redirects to landing pages
+            async with session.post(url, headers=headers, json=payload, allow_redirects=False) as response:
+                resp_text = await response.text()
+                logger.info("Backend response status: %d, body: %s", response.status, resp_text)
+                
+                if response.status == 200:
+                    try:
+                        resp_json = json.loads(resp_text)
+                        if resp_json.get("success"):
+                            logger.info("Successfully recorded licensing agreement for User %s (%s)", username, user_id)
+                            return True
+                    except Exception as e:
+                        logger.error("Failed to parse backend response as JSON: %s", e)
+                    
+                    logger.error("Backend returned 200 OK but the response structure was invalid or unsuccessful")
+                    return False
+                else:
+                    logger.error(
+                        "Failed to record licensing agreement. Status: %d, Response: %s",
+                        response.status,
+                        resp_text
+                    )
+                    return False
+    except Exception as e:
+        logger.exception("Exception occurred while sending licensing agreement to backend: %s", e)
+        return False
+
+
+def html_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#x27;")
+
+
+def generate_transcript_html(thread_name: str, messages: list[discord.Message]) -> str:
+    css = """
+    body {
+        background-color: #1e1f22;
+        color: #dbdee1;
+        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        padding: 20px;
+        margin: 0;
+    }
+    .container {
+        max-width: 900px;
+        margin: 0 auto;
+        background-color: #2b2d31;
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+    }
+    h1 {
+        color: #f2f3f5;
+        font-size: 24px;
+        margin-top: 0;
+        border-bottom: 1px solid #3f4147;
+        padding-bottom: 10px;
+    }
+    .message {
+        display: flex;
+        margin-bottom: 16px;
+    }
+    .avatar {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        margin-right: 16px;
+        background-color: #5865f2;
+        object-fit: cover;
+    }
+    .message-content {
+        flex: 1;
+    }
+    .header {
+        display: flex;
+        align-items: baseline;
+        margin-bottom: 4px;
+    }
+    .username {
+        font-weight: 600;
+        color: #f2f3f5;
+        margin-right: 8px;
+        font-size: 15px;
+    }
+    .timestamp {
+        font-size: 12px;
+        color: #949ba4;
+    }
+    .body {
+        font-size: 15px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+    .attachment {
+        margin-top: 8px;
+        background-color: #2e3035;
+        border: 1px solid #3f4147;
+        border-radius: 4px;
+        padding: 10px;
+        display: inline-block;
+        max-width: 100%;
+    }
+    .attachment img {
+        max-width: 100%;
+        max-height: 400px;
+        border-radius: 4px;
+        display: block;
+    }
+    .attachment a {
+        color: #00a8fc;
+        text-decoration: none;
+    }
+    .attachment a:hover {
+        text-decoration: underline;
+    }
+    """
+    
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Transcript - {html_escape(thread_name)}</title>
+    <style>{css}</style>
+</head>
+<body>
+    <div class="container">
+        <h1>Transcript: {html_escape(thread_name)}</h1>
+        <p style="color: #949ba4; font-size: 14px; margin-bottom: 20px;">
+            Generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
+        </p>
+    """
+    
+    for msg in messages:
+        if msg.author.bot and msg.content == "" and not msg.attachments:
+            continue
+            
+        avatar_url = msg.author.display_avatar.url if msg.author.avatar else "https://cdn.discordapp.com/embed/avatars/0.png"
+        username = msg.author.display_name
+        timestamp = msg.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')
+        content = html_escape(msg.content)
+        
+        # Simple markdown to HTML
+        content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', content)
+        content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', content)
+        content = re.sub(r'_(.*?)_', r'<em>\1</em>', content)
+        
+        html += f"""
+        <div class="message">
+            <img class="avatar" src="{avatar_url}" alt="avatar">
+            <div class="message-content">
+                <div class="header">
+                    <span class="username">{html_escape(username)}</span>
+                    <span class="timestamp">{timestamp}</span>
+                </div>
+                <div class="body">{content}</div>
+        """
+        
+        for att in msg.attachments:
+            is_image = att.content_type and att.content_type.startswith("image/")
+            if is_image:
+                html += f"""
+                <div class="attachment">
+                    <a href="{att.url}" target="_blank">
+                        <img src="{att.url}" alt="{html_escape(att.filename)}">
+                    </a>
+                    <div style="margin-top: 4px; font-size: 12px;"><a href="{att.url}" target="_blank">{html_escape(att.filename)}</a> ({att.size // 1024} KB)</div>
+                </div>
+                """
+            else:
+                html += f"""
+                <div class="attachment">
+                    📎 <a href="{att.url}" target="_blank">{html_escape(att.filename)}</a> ({att.size // 1024} KB)
+                </div>
+                """
+                
+        html += """
+            </div>
+        </div>
+        """
+        
+    html += """
+    </div>
+</body>
+</html>
+    """
+    return html
+
+
+class TicketSystemSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="General Submission",
+                value="General",
+                description="Submit any countryball or Mymic.",
+                emoji="🎨"
+            ),
+            discord.SelectOption(
+                label="Upcoming Banners",
+                value="Upcoming Banner",
+                description="Submit art for the upcoming banner!",
+                emoji="📅"
+            ),
+            discord.SelectOption(
+                label="Asset(s)",
+                value="Asset",
+                description="Submit art as a game asset.",
+                emoji="🧩"
+            ),
+            discord.SelectOption(
+                label="Mymic",
+                value="Mymic",
+                description="Submit art for a Mymic (raid boss).",
+                emoji="🎃"
+            )
+        ]
+        super().__init__(
+            placeholder="Select a category to begin your submission...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="ticket_system_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        category = self.values[0]
+        modal = TOSModal(category=category)
+        await interaction.response.send_modal(modal)
+
+
+class TicketSystemView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketSystemSelect())
+
+
+class TOSModal(discord.ui.Modal):
+    def __init__(self, category: str):
+        super().__init__(title=f"TOS Agreement - {category}")
+        self.category = category
+
+        # Add a text display for the Terms of Service link (supports markdown links)
+        self.text_info = discord.ui.TextDisplay(
+            "Please review our [Terms of Service](https://polandballgo.com/terms) to understand how we use community submissions.\n\n"
+            "By checking the boxes below, you confirm that your submission is your original work and grant the Polandball Go team necessary license to use it in game."
+        )
+        self.add_item(self.text_info)
+
+        # Add checkbox group
+        self.tos = discord.ui.CheckboxGroup(
+            custom_id="tos_checkbox_group",
+            min_values=2,
+            max_values=2,
+            required=True
+        )
+        self.tos.add_option(
+            label="I agree to the Terms and grant the Polandball Go team a license to use my art under these terms.",
+            value="agree_rules"
+        )
+        self.tos.add_option(
+            label="I confirm this is 100% my original work.",
+            value="confirm_original"
+        )
+        
+        # Wrap the checkbox group in a Label component to comply with Discord API
+        self.tos_label = discord.ui.Label(
+            text="Rules & TOS Agreement",
+            component=self.tos,
+            description="Please check both boxes to agree before proceeding."
+        )
+        self.add_item(self.tos_label)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
+            return
+
+        channel = interaction.channel
+        if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+            await interaction.followup.send("Tickets can only be created under a text channel.", ephemeral=True)
+            return
+
+        user = interaction.user
+        category_label = self.category
+        thread_name = f"Submit Your Art - {category_label} - {user.name}"
+
+        # Register the licensing agreement signature in the backend database
+        await submit_licensing_agreement(
+            user_id=user.id,
+            username=user.name,
+            guild_id=guild.id,
+            guild_name=guild.name,
+            agreement_type=category_label,
+            agreed_checkboxes=["agree_rules", "confirm_original"]
+        )
+
+        # Resolve roles to ping
+        config = load_ticket_config()
+        channel_id_str = str(channel.id)
+        role_ids = config.get(channel_id_str, {}).get("ping_role_ids", [])
+        
+        roles_to_ping = []
+        for r_id in role_ids:
+            role = guild.get_role(r_id)
+            if role:
+                roles_to_ping.append(role)
+
+        # Fallback to scanning guild roles for Manager, Admin, Art Reviewer
+        if not roles_to_ping:
+            target_names = {"manager", "admin", "art reviewer"}
+            for role in guild.roles:
+                if role.name.lower() in target_names:
+                    roles_to_ping.append(role)
+
+        # Build ping mentions list
+        mentions = [user.mention] + [r.mention for r in roles_to_ping]
+        ping_content = ", ".join(mentions)
+
+        try:
+            # Create a private thread if possible, fallback to public thread
+            try:
+                thread = await channel.create_thread(
+                    name=thread_name,
+                    type=discord.ChannelType.private_thread,
+                    invitable=False,
+                    reason=f"Art Submission Ticket for {user.name}"
+                )
+            except discord.HTTPException as e:
+                logger.warning("Failed to create private thread, falling back to public thread: %s", e)
+                thread = await channel.create_thread(
+                    name=thread_name,
+                    type=discord.ChannelType.public_thread,
+                    reason=f"Art Submission Ticket for {user.name}"
+                )
+
+            try:
+                await thread.add_user(user)
+            except Exception:
+                pass
+
+            # Create welcome embed
+            welcome_embed = discord.Embed(
+                title="Ticket Created",
+                description=(
+                    f"Welcome, {user.mention}, and thank you for creating art for an upcoming banner for the Polandball GO game!\n\n"
+                    f"Please put the image(s) of the splash art and/or sprite art you are submitting for review in this chat, and let us know what countries they are for.\n\n"
+                    f"We will respond to you as soon as possible. Please be patient."
+                ),
+                color=discord.Color.blurple()
+            )
+            welcome_embed.add_field(
+                name="Terms Agreement",
+                value="☑️ I agree to the Terms and grant the Polandball Go team a license to use my art under these terms.\n☑️ I confirm this is 100% my original work.",
+                inline=False
+            )
+            welcome_embed.set_footer(text="Polandball Go | Zone Gaming")
+
+            # Send ping and welcome embed
+            welcome_msg = await thread.send(content=ping_content, embed=welcome_embed)
+            
+            # Pin the welcome message
+            try:
+                await welcome_msg.pin()
+            except Exception as e:
+                logger.warning("Failed to pin welcome message: %s", e)
+
+            await interaction.followup.send(
+                f"✅ Your ticket has been created! Please head over to {thread.mention} to submit your art.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            logger.exception("Failed to create ticket thread: %s", e)
+            await interaction.followup.send(
+                f"❌ Failed to create your ticket thread: {e}",
+                ephemeral=True
+            )
+
+
 class PolandballBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -535,8 +977,9 @@ class PolandballBot(commands.Bot):
         asyncio.create_task(_warm())
 
     async def setup_hook(self):
-        """Setup hook to register error handlers"""
+        """Setup hook to register error handlers and persistent views"""
         self.tree.error(self.on_app_command_error)
+        self.add_view(TicketSystemView())
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         """Global error handler for app commands"""
@@ -1117,6 +1560,69 @@ async def ping(interaction: discord.Interaction):
             await interaction.followup.send("pong")
     except (discord.errors.NotFound, discord.errors.HTTPException) as e:
         logger.warning("Failed to respond to ping command: %s", e)
+
+
+@bot.tree.command(
+    name="ticket_setup",
+    description="Set up the persistent submission ticket system in this channel"
+)
+@app_commands.describe(
+    role1="Optional reviewer role to ping on new tickets",
+    role2="Optional second reviewer role to ping on new tickets",
+    role3="Optional third reviewer role to ping on new tickets"
+)
+@app_commands.default_permissions(manage_channels=True)
+async def ticket_setup(
+    interaction: discord.Interaction,
+    role1: Optional[discord.Role] = None,
+    role2: Optional[discord.Role] = None,
+    role3: Optional[discord.Role] = None
+):
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
+    channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.followup.send("This command can only be run in a text channel.", ephemeral=True)
+        return
+
+    # Build list of role IDs to ping
+    ping_role_ids = []
+    role_names = []
+    for r in [role1, role2, role3]:
+        if r:
+            ping_role_ids.append(r.id)
+            role_names.append(r.name)
+
+    # Save configuration
+    config = load_ticket_config()
+    config[str(channel.id)] = {
+        "ping_role_ids": ping_role_ids
+    }
+    save_ticket_config(config)
+
+    # Create the beautiful setup embed
+    setup_embed = discord.Embed(
+        title="Submit Your Art to Polandball Go!",
+        description=(
+            "Ready to submit?\n\n"
+            "Please review our [Terms of Service](https://polandballgo.com/terms) to understand how we use community submissions.\n\n"
+            "By agreeing below, you give us the necessary permission to feature your art in the game, and confirm that the art you submit is 100% your original work!\n\n"
+            "If you are making both a sprite & splash pair, please submit them together at the same time. If you have only done one, come back when you've finished the other and submit them together.\n\n"
+            "Before submitting, make sure to review the <#1466232986667057243>, and to select the proper category of submission to make the submission process easier and faster. 😄"
+        ),
+        color=discord.Color.blurple()
+    )
+    setup_embed.set_thumbnail(url="https://polandballgo.com/assets/logo.png")
+
+    view = TicketSystemView()
+    await channel.send(embed=setup_embed, view=view)
+
+    ping_msg = f"pinging roles: {', '.join(role_names)}" if role_names else "searching server roles automatically"
+    await interaction.followup.send(
+        f"✅ Ticket system set up successfully in this channel ({ping_msg})!",
+        ephemeral=True
+    )
 
 
 class ArtType(Enum):
@@ -1894,6 +2400,275 @@ async def help_command(interaction: discord.Interaction):
     await interaction.followup.send(embed=splash_embed, ephemeral=True)
 
 
+ticket_group = app_commands.Group(
+    name="ticket",
+    description="Commands for managing art submission tickets",
+    default_permissions=discord.Permissions(manage_threads=True)
+)
+
+@ticket_group.command(name="close", description="Archive and lock the current ticket thread, generating an HTML transcript")
+@app_commands.describe(message="An optional closing message sent to the ticket creator's DMs")
+async def close_ticket(interaction: discord.Interaction, message: Optional[str] = None):
+    thread = interaction.channel
+    if not isinstance(thread, discord.Thread):
+        await interaction.response.send_message("❌ This command can only be used inside a ticket thread.", ephemeral=True)
+        return
+
+    # Check permission: owner, manage_threads, or role matches config
+    is_owner = thread.owner_id == interaction.user.id
+    has_permission = interaction.user.guild_permissions.manage_threads
+    
+    config = load_ticket_config()
+    channel_id_str = str(thread.parent_id)
+    role_ids = config.get(channel_id_str, {}).get("ping_role_ids", [])
+    has_staff_role = any(role.id in role_ids for role in interaction.user.roles)
+    
+    if not (is_owner or has_permission or has_staff_role):
+        await interaction.response.send_message("❌ You do not have permission to close this ticket.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    
+    try:
+        # If a closing message is provided, post it to the thread first so it's included in the transcript
+        if message:
+            staff_msg_embed = discord.Embed(
+                title="Closing Message from Staff",
+                description=message,
+                color=discord.Color.orange(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            staff_msg_embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+            await thread.send(embed=staff_msg_embed)
+
+        # DM the ticket creator if a message is specified
+        dm_status = None
+        if message:
+            if thread.owner_id:
+                try:
+                    creator = await interaction.client.fetch_user(thread.owner_id)
+                    dm_embed = discord.Embed(
+                        title=f"Ticket Closed: {thread.name}",
+                        description=f"Your ticket in **{interaction.guild.name}** has been closed.",
+                        color=discord.Color.red(),
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    dm_embed.add_field(name="Closing Message from Staff", value=message, inline=False)
+                    await creator.send(embed=dm_embed)
+                    dm_status = "✅ Sent closing message to the user's DM inbox."
+                except discord.Forbidden:
+                    dm_status = "❌ Failed to send DM (user has DMs disabled or blocked)."
+                except Exception as dm_err:
+                    logger.warning("Failed to DM user %s: %s", thread.owner_id, dm_err)
+                    dm_status = f"❌ Failed to send DM: {dm_err}"
+            else:
+                dm_status = "❌ Could not determine thread owner to send DM."
+
+        # Fetch all messages in the thread
+        messages = []
+        async for msg in thread.history(limit=None, oldest_first=True):
+            messages.append(msg)
+            
+        # Generate HTML transcript
+        transcript_content = generate_transcript_html(thread.name, messages)
+        
+        # Determine log channel
+        target_channel = None
+        if TICKET_TRANSCRIPT_CHANNEL_ID:
+            try:
+                channel_id = int(TICKET_TRANSCRIPT_CHANNEL_ID)
+                target_channel = interaction.client.get_channel(channel_id)
+                if not target_channel:
+                    target_channel = await interaction.client.fetch_channel(channel_id)
+            except Exception as e:
+                logger.error("Failed to resolve TICKET_TRANSCRIPT_CHANNEL_ID %s: %s", TICKET_TRANSCRIPT_CHANNEL_ID, e)
+        
+        # Fallback to parent channel if not configured or not found
+        if not target_channel:
+            target_channel = thread.parent
+            
+        # Write to temp file
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, f"transcript-{thread.id}.html")
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.write(transcript_content)
+            
+        # Send transcript file
+        try:
+            log_embed = discord.Embed(
+                title="Ticket Transcript Log",
+                description=f"Ticket **{thread.name}** (ID: {thread.id}) closed by {interaction.user.mention}.",
+                color=discord.Color.dark_grey(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            if message:
+                log_embed.add_field(name="Closing Message", value=message, inline=False)
+            if dm_status:
+                log_embed.add_field(name="User DM Status", value=dm_status, inline=False)
+
+            file_to_send = discord.File(temp_path, filename=f"transcript-{thread.name}-{thread.id}.html")
+            await target_channel.send(
+                embed=log_embed,
+                file=file_to_send
+            )
+        except Exception as send_err:
+            logger.error("Failed to send transcript file: %s", send_err)
+            # Try fallback to parent channel if it wasn't the parent channel
+            if target_channel != thread.parent:
+                try:
+                    log_embed = discord.Embed(
+                        title="Ticket Transcript Log",
+                        description=f"Ticket **{thread.name}** (ID: {thread.id}) closed by {interaction.user.mention}.",
+                        color=discord.Color.dark_grey(),
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    if message:
+                        log_embed.add_field(name="Closing Message", value=message, inline=False)
+                    if dm_status:
+                        log_embed.add_field(name="User DM Status", value=dm_status, inline=False)
+
+                    file_to_send = discord.File(temp_path, filename=f"transcript-{thread.name}-{thread.id}.html")
+                    await thread.parent.send(
+                        embed=log_embed,
+                        file=file_to_send
+                    )
+                except Exception as fb_err:
+                    logger.error("Failed fallback transcript send: %s", fb_err)
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
+        # Notify user inside the thread right before archiving
+        close_embed = discord.Embed(
+            title="Ticket Closed",
+            description=f"This ticket has been closed by {interaction.user.mention}.\nThe thread is being locked and archived.",
+            color=discord.Color.red()
+        )
+        if target_channel != thread.parent:
+            close_embed.add_field(
+                name="Archives",
+                value="An HTML transcript of this discussion has been saved to the transcripts log channel.",
+                inline=False
+            )
+        else:
+            close_embed.add_field(
+                name="Archives",
+                value="An HTML transcript of this discussion has been posted to this channel.",
+                inline=False
+            )
+            
+        if dm_status:
+            close_embed.add_field(
+                name="User DM Status",
+                value=dm_status,
+                inline=False
+            )
+            
+        await interaction.followup.send(embed=close_embed)
+        
+        # Archive and lock the thread
+        await thread.edit(archived=True, locked=True, reason=f"Closed by {interaction.user.name}")
+        
+    except Exception as e:
+        logger.exception("Failed to close ticket: %s", e)
+        await interaction.followup.send(f"❌ An error occurred while closing the ticket: {e}", ephemeral=True)
+
+
+@ticket_group.command(name="reopen", description="Unarchive and unlock a ticket thread")
+@app_commands.describe(thread="The thread to reopen (optional, defaults to current thread)")
+async def reopen_ticket(interaction: discord.Interaction, thread: Optional[discord.Thread] = None):
+    target_thread = thread or interaction.channel
+    if not isinstance(target_thread, discord.Thread):
+        await interaction.response.send_message("❌ Please specify or run this command inside a ticket thread.", ephemeral=True)
+        return
+
+    # Check permission
+    is_owner = target_thread.owner_id == interaction.user.id
+    has_permission = interaction.user.guild_permissions.manage_threads
+    
+    config = load_ticket_config()
+    channel_id_str = str(target_thread.parent_id)
+    role_ids = config.get(channel_id_str, {}).get("ping_role_ids", [])
+    has_staff_role = any(role.id in role_ids for role in interaction.user.roles)
+    
+    if not (is_owner or has_permission or has_staff_role):
+        await interaction.response.send_message("❌ You do not have permission to reopen this ticket.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+
+    try:
+        # Unarchive and unlock
+        await target_thread.edit(archived=False, locked=False, reason=f"Reopened by {interaction.user.name}")
+        
+        reopen_embed = discord.Embed(
+            title="Ticket Reopened",
+            description=f"This ticket has been reopened by {interaction.user.mention}.",
+            color=discord.Color.green()
+        )
+        await target_thread.send(embed=reopen_embed)
+        await interaction.followup.send(f"✅ Reopened ticket thread {target_thread.mention}.", ephemeral=True)
+        
+    except Exception as e:
+        logger.exception("Failed to reopen ticket: %s", e)
+        await interaction.followup.send(f"❌ Failed to reopen the ticket: {e}", ephemeral=True)
+
+
+bot.tree.add_command(ticket_group)
+
+
+@bot.tree.command(name="tickets", description="List recently archived ticket threads in this channel")
+@app_commands.default_permissions(manage_threads=True)
+async def list_tickets(interaction: discord.Interaction):
+    channel = interaction.channel
+    if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+        await interaction.response.send_message("❌ This command must be run in a text or forum channel.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        archived_threads = []
+        # Fetch public archived threads
+        async for thread in channel.archived_threads(limit=25, private=False):
+            archived_threads.append(thread)
+            
+        # Fetch private archived threads
+        try:
+            async for thread in channel.archived_threads(limit=25, private=True):
+                archived_threads.append(thread)
+        except Exception as private_err:
+            logger.warning("Failed to fetch private archived threads: %s", private_err)
+
+        if not archived_threads:
+            await interaction.followup.send("No archived ticket threads found in this channel.", ephemeral=True)
+            return
+
+        # Sort archived threads by archive timestamp descending (fallback to created_at or current time)
+        archived_threads.sort(
+            key=lambda t: t.archive_timestamp if t.archive_timestamp else (t.created_at or datetime.now(timezone.utc)),
+            reverse=True
+        )
+        archived_threads = archived_threads[:25]
+
+        embed = discord.Embed(
+            title=f"Archived Tickets in #{channel.name}",
+            description="Here are the last 25 archived threads in this channel. Click to view them:",
+            color=discord.Color.blurple()
+        )
+        
+        thread_list = []
+        for thread in archived_threads:
+            timestamp = int(thread.archive_timestamp.timestamp()) if thread.archive_timestamp else int(time.time())
+            thread_list.append(f"• {thread.mention} - Archived <t:{timestamp}:R>")
+            
+        embed.description = "\n".join(thread_list)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        logger.exception("Failed to list archived threads: %s", e)
+        await interaction.followup.send(f"❌ Failed to list archived tickets: {e}", ephemeral=True)
 
 
 async def handle_client(reader, writer):
