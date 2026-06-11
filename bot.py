@@ -891,7 +891,7 @@ class TOSModal(discord.ui.Modal):
 
         user = interaction.user
         category_label = self.category
-        thread_name = f"Submit Your Art - {category_label} - {user.name}"
+        thread_name = f"{category_label} - {user.name}"
 
         # Map category to target channel ID
         category_channels = {
