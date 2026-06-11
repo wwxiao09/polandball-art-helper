@@ -897,6 +897,26 @@ class TOSModal(discord.ui.Modal):
             await interaction.followup.send("Tickets can only be created under a text or forum channel.", ephemeral=True)
             return
 
+        # Check if the user already has an active ticket for this category
+        existing_thread = None
+        try:
+            active_threads = await guild.active_threads()
+            for active_thread in active_threads:
+                if active_thread.parent_id == target_channel.id:
+                    if active_thread.name.endswith(f" - {user.name}"):
+                        existing_thread = active_thread
+                        break
+        except Exception as e:
+            logger.warning("Failed to fetch active threads: %s", e)
+
+        if existing_thread:
+            await interaction.followup.send(
+                f"❌ You already have an open ticket for **{category_label}** in {existing_thread.mention}.\n"
+                "Please close or complete that ticket before opening a new one.",
+                ephemeral=True
+            )
+            return
+
         # Register the licensing agreement signature in the database
         await submit_licensing_agreement(
             user_id=user.id,
