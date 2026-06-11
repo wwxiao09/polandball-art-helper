@@ -510,20 +510,45 @@ class AvailabilityIndex:
 
 
 TICKET_CONFIG_FILE = "ticket_config.json"
+DEFAULT_PING_ROLES = [1418038715489587253, 1445254371175825538, 1438736481354125395]
 
 def load_ticket_config() -> dict:
+    config = {}
     if os.path.exists(TICKET_CONFIG_FILE):
         try:
             with open(TICKET_CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                config = json.load(f)
         except Exception as e:
             logger.error("Failed to load ticket config: %s", e)
-    return {}
+
+    # Wrap config in a helper dict subclass so any channel ID fallback uses root ping_role_ids or DEFAULT_PING_ROLES
+    class ConfigDict(dict):
+        def get(self, key, default=None):
+            val = super().get(key)
+            if val is None:
+                return {"ping_role_ids": self.get_root_roles()}
+            return val
+            
+        def __getitem__(self, key):
+            if key not in self:
+                return {"ping_role_ids": self.get_root_roles()}
+            return super().__getitem__(key)
+            
+        def get_root_roles(self):
+            if "ping_role_ids" in self:
+                val = self["ping_role_ids"]
+                if isinstance(val, list):
+                    return val
+            return DEFAULT_PING_ROLES
+            
+    return ConfigDict(config)
 
 def save_ticket_config(config: dict):
     try:
+        # Convert back to standard dict to avoid custom class serialization issues
+        plain_config = dict(config)
         with open(TICKET_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4)
+            json.dump(plain_config, f, indent=4)
     except Exception as e:
         logger.error("Failed to save ticket config: %s", e)
 
