@@ -16,10 +16,7 @@ Commands (slash commands: /)
 4) /artist name: "Artist Name" (optional: kind = splash / sprite / both)
    → Shows all characters whose sprite or splash art was created by the specified artist.
 
-5) /submit
-   → Submit Sprite or Splash art for a character (PNG only).
-
-6) /help
+5) /help
    → View all bot commands and Polandball art guidelines.
 
 
@@ -2212,126 +2209,7 @@ async def retry_run_blocking(callable_fn, attempts: int = 3, base_delay: float =
             await asyncio.sleep(base_delay * (2 ** i) + random.random())
     raise last_exc
 
-@bot.tree.command(name="submit", description="Submit art")
-@app_commands.describe(
-    category="Art category (Sprite or Splash)",
-    artist_name="Folder artist name (as you want it to appear)",
-    country="Country / character name (from the game list)",
-    image="Attach your art file (PNG only)",
-)
-@app_commands.choices(
-    category=[app_commands.Choice(name=c, value=c) for c in CATEGORY_CHOICES]
-)
-async def submit_art(
-    interaction: discord.Interaction,
-    category: app_commands.Choice[str],
-    artist_name: str,
-    country: str,
-    image: discord.Attachment,
-):
-    if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True)
-    await interaction.followup.send(
-        "Step 1/3: Validating submission…",
-        ephemeral=True,
-    )
 
-    tmp_path: Optional[str] = None
-
-    try:
-        # --- 1) Enforce country must be from spreadsheet ---
-        try:
-            idx = await run_blocking(bot._load_index, timeout=30)  # AvailabilityIndex built from your sheet
-            valid_countries = set(idx.all_names)
-        except Exception as e:
-            logger.exception("Failed to load index for submit_art: %s", e)
-            await interaction.followup.send(
-                "❌ I couldn't load the country list from the sheet. Please try again later.",
-                ephemeral=True,
-            )
-            return
-
-        if country not in valid_countries:
-            await interaction.followup.send(
-                f"❌ `{country}` is not a valid country in the game list.\n"
-                "Please choose a country from the autocomplete suggestions.",
-                ephemeral=True,
-            )
-            return
-
-        # --- 2) Enforce PNG only ---
-        filename = image.filename or ""
-        _, ext = os.path.splitext(filename)
-        ext = ext.lower()
-
-        # Optionally also check content_type: image.content_type == "image/png"
-        if ext != ".png":
-            await interaction.followup.send(
-                "❌ Only **PNG** files are allowed.\n"
-                f"You uploaded `{filename}`.\n"
-                "Please export your art as a `.png` file and try again.",
-                ephemeral=True,
-            )
-            return
-
-        tmp_path = os.path.join(tempfile.gettempdir(), f"polandball_{uuid.uuid4()}{ext}")
-
-        await image.save(tmp_path)
-
-        service = interaction.client.drive_service
-        discord_username = interaction.user.name
-
-        await interaction.followup.send(
-            "Step 2/3: Uploading PNG to Google Drive…",
-            ephemeral=True,
-        )
-
-        try:
-            async def do_upload():
-                return await run_blocking(
-                    upload_art_to_drive,
-                    service,
-                    tmp_path,
-                    category=category.value,
-                    country=country,
-                    discord_username=discord_username,
-                    artist_name=artist_name,
-                    timeout=180,
-                )
-
-            drive_file, drive_path = await retry_run_blocking(do_upload)
-
-            await interaction.followup.send(
-                "Step 3/3: Finalizing Submission...",
-                ephemeral=True,
-            )
-
-            fire_emoji = get_custom_emoji(bot, "PoleonFire")
-            await interaction.followup.send(
-                "✅ **Submission received!**\n\n"
-                "Your art has been uploaded successfully.\n"
-                f"You'll be contacted if any changes are needed. Thank you for helping bring Polandball Go to life! {fire_emoji}",
-                ephemeral=True,
-            )
-            return
-
-        finally:
-            if tmp_path:
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
-
-
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()  # shows full error in your bot logs/console
-
-        await interaction.followup.send(
-            f"❌ Something went wrong while uploading your art:\n`{type(e).__name__}: {str(e) or repr(e)}`",
-            ephemeral=True,
-        )
 
 
 SPRITE_EXAMPLE_URL = "https://raw.githubusercontent.com/wwxiao09/polandball-art-helper/669d6100bce364b77d74b90885830fa85b6b0231/denmark.png"
@@ -2340,25 +2218,7 @@ SPLASH_EXAMPLE_URL = "https://raw.githubusercontent.com/wwxiao09/polandball-art-
 
 
 
-@submit_art.autocomplete("country")
-async def submit_art_country_autocomplete(interaction: discord.Interaction, current: str):
-    try:
-        # ✅ FAST PATH: if cache already exists, use it immediately
-        if interaction.client._countries_cache:
-            all_countries = interaction.client._countries_cache
-        else:
-            # kick off warmup but don't block autocomplete
-            asyncio.create_task(interaction.client.get_country_names_cached())
-            return []
 
-        return [
-            app_commands.Choice(name=c, value=c)
-            for c in all_countries
-            if current.lower() in c.lower()
-        ][:25]
-    except Exception:
-        logger.exception("Autocomplete failed")
-        return []
 
 
 @bot.tree.command(
@@ -2375,11 +2235,6 @@ async def help_command(interaction: discord.Interaction):
 
     # --- Commands section ---
     commands_text = (
-        "**/submit** – Submit art to Polandball Go\n"
-        "• `category` – **Sprite** or **Splash**\n"
-        "• `artist_name` – How you want to be credited in game\n"
-        "• `country` – Pick from the autocomplete list (only countries from the game sheet)\n"
-        "• `image` – **PNG only**\n\n"
         "**/available** `[character]`\n"
         "• No name → lists all characters that are available as sprites / splashes\n"
         "• With a name → shows if that character’s sprite/splash is available\n\n"
@@ -2395,8 +2250,7 @@ async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(
         title="Polandball Go Art Helper – Help",
         description=(
-            "Here’s how to use the bot and how to contribute artwork to Polandball Go.\n"
-            "You can submit either **Sprite Art**, **Splash Art**, or both."
+            "Here’s how to use the bot and how to contribute artwork to Polandball Go."
         ),
         color=discord.Color.blurple(),
     )
@@ -2411,6 +2265,8 @@ async def help_command(interaction: discord.Interaction):
             "• No lines separating the flag colors\n"
             "• No circle, line, or shape tools of any kind\n"
             "• Everything must be hand-drawn\n"
+            "• No human anatomy (arms, hands, legs, faces, etc.)\n"
+            "• No AI (for obvious reasons)\n\n"
             "⚠️ **Art that does not follow these rules may not be accepted.**\n\n"
              "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         ),
@@ -2423,11 +2279,12 @@ async def help_command(interaction: discord.Interaction):
         name="**1) Splash Art (Example Below)**",
         value=(
             "• Detailed illustrations, often with backgrounds or extra elements\n"
-            "• Used in character screens\n"
+            "• Used on character screens\n"
             "• **Aspect ratio:** 3:2\n"
+            "    ◦ Recommended canvas size: 3000×2000\n"
             "• Should primarily feature the main countryball\n"
-            "• Other balls may appear as side characters\n"
-            "• Avoid placing the main ball too close to the canvas edges\n\n"
+            "    ◦ Other countryballs may appear as side characters\n"
+            "• Avoid placing the main ball too close to the edges of the canvas\n\n"
              "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         ),
         inline=False,
@@ -2438,14 +2295,14 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="**2) Sprite Art (Example Below)**",
         value=(
-            "• Simple, clean designs with no background\n"
-            "• Less detailed than splash art (appears smaller in-game)\n"
+            "• Backgroundless (transparent background required)\n"
+            "• Less detailed than splash art because they appear smaller in-game\n"
             "• Too much detail may not be visible\n"
             "• **Aspect ratio:** 1:1\n"
-            "• **Recommended canvas size:** 2500 × 2500\n"
-            "• Sprite size should be proportional to the country\n"
-            "  (e.g. San Marino smaller than the USA)\n"
-            "• A subtle bottom shadow is **required**\n\n"
+            "    ◦ Recommended canvas size: 2500×2500\n"
+            "• Size the sprite appropriately. For example, San Marino should occupy less canvas space than the USA.\n"
+            "• A subtle bottom shadow is required\n"
+            "• Export as a PNG with transparency enabled\n\n"
              "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         ),
         inline=False,
@@ -2456,11 +2313,12 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="📌 **Submitting Rules**",
         value=(
-            "• Anyone may submit art for any country at any time\n"
-            "• This includes countries that are already in-game\n"
-            "• PBGO supports alternate character forms\n"
-            "• Your submission may be used as an alternate form\n"
-            "• **Submitting art does not guarantee it will be added to the game**\n\n"
+            "• You may submit art for any character, including characters already in-game or characters not currently on the list\n"
+            "    ◦ PBGO supports alternate character forms, meaning multiple versions of the same country can exist\n"
+            "    ◦ If the character is already in-game, your submission may instead be used as an alternate form\n"
+            "• We rely on our artists to be honest. Please only submit art that you created yourself (no submitting for friends!)\n"
+            "• Submitting your work here confirms that you are the original creator and that you accept our Terms of Service (polandballgo.com/terms)\n"
+            "• Submitting art does not guarantee that it will be added to the game\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         ),
         inline=False,
